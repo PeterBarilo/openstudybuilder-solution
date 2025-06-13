@@ -1,86 +1,163 @@
-version: "3.9"
+# Docker Compose file for preview environment and building docker images in pipelines
 
 services:
 
+  # Database service for local development
+  database:
+    build:
+      args:
+        NEO4J_IMAGE: ${NEO4J_IMAGE:-neo4j:5.19.0-enterprise}
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.13.0-slim}
+        NEO4J_server_memory_heap_initial__size: "3G"
+        NEO4J_server_memory_heap_max__size: "3G"
+        NEO4J_server_memory_pagecache_size: "2G"
+        CDISC_DATA_DIR: ${CDISC_DATA_DIR:-mdr_standards_import/container_booting/}
+        NEO4J_MDR_AUTH_PASSWORD: "${NEO4J_PASSWORD:-changeme1234}"
+        UID: ${UID:-1000}
+      context: ./
+      dockerfile: database.Dockerfile
+    environment:
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      NEO4J_server_memory_heap_initial__size: "2G"
+      NEO4J_server_memory_heap_max__size: "2G"
+      NEO4J_server_memory_pagecache_size: "1G"
+      NEO4J_server_default__listen__address: "0.0.0.0"
+      NEO4J_server_default__advertised__address: "localhost"
+      NEO4J_server_bolt_advertised__address: "localhost:5002"
+      NEO4J_server_http_advertised__address: "localhost:5001"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${NEO4J_BOLT_PORT:-5002}:7687"
+      - "${BIND_ADDRESS:-127.0.0.1}:${NEO4J_HTTP_PORT:-5001}:7474"
+    volumes:
+      - type: volume
+        source: data
+        target: /data
+      # For database dumps, you can mount a folder into the container ex.:
+      #- ./neo4j-dumps:/data/dumps
+
+  # API image & service, distinct build stages for production and development
   api:
     build:
       context: ./clinical-mdr-api
       dockerfile: Dockerfile
       args:
-        TARGET:  ${BUILD_TARGET:-dev}
+        TARGET: ${BUILD_TARGET:-dev}
+    image: ${API_IMAGE:-}
+    depends_on:
+      database:
+        condition: service_healthy
     environment:
-      NEO4J_DSN: "${NEO4J_DSN}"
-      ALLOW_ORIGIN_REGEX: ".*"
-      OAUTH_ENABLED: "false"
-      OAUTH_RBAC_ENABLED: "false"
+      NEO4J_DSN: "${NEO4J_DSN:-bolt://neo4j:changeme1234@database:7687/mdrdb}"
+      ALLOW_ORIGIN_REGEX: "${ALLOW_ORIGIN_REGEX:-.*}"
+      OAUTH_ENABLED: "${OAUTH_ENABLED:-False}"
+      OAUTH_RBAC_ENABLED: "${OAUTH_RBAC_ENABLED:-False}"
+      OAUTH_METADATA_URL: "${OAUTH_METADATA_URL:-}"
+      OAUTH_API_APP_ID: "${OAUTH_API_APP_ID:-}"
+      OAUTH_API_APP_SECRET: "${OAUTH_API_APP_SECRET:-}"
+      OAUTH_SWAGGER_APP_ID: "${OAUTH_SWAGGER_APP_ID:-}"
+      MS_GRAPH_INTEGRATION_ENABLED: "${MS_GRAPH_INTEGRATION_ENABLED:-}"
+      MS_GRAPH_GROUPS_QUERY: "${MS_GRAPH_GROUPS_QUERY:-}"
       UVICORN_PORT: 5003
       UVICORN_ROOT_PATH: "/api"
-    expose:
-      - "8501:5003"
+      # deprecated #
+      OAUTH_APP_ID: "${OAUTH_APP_ID:-}"
+      OAUTH_APP_SECRET: "${OAUTH_APP_SECRET:-}"
+      OAUTH_CLIENT_ID: "${OAUTH_CLIENT_ID:-}"
+      OIDC_METADATA_DOCUMENT: "${OIDC_METADATA_DOCUMENT:-}"
 
+  # Consumer API image & service
   consumerapi:
     build:
       context: ./clinical-mdr-api
       dockerfile: Dockerfile
       args:
-        TARGET: prod
+        TARGET: ${BUILD_TARGET:-dev}
+    image: ${API_IMAGE:-}
+    depends_on:
+      database:
+        condition: service_healthy
     environment:
-      NEO4J_DSN: "${NEO4J_DSN}"
-      ALLOW_ORIGIN_REGEX: ".*"
-      OAUTH_ENABLED: "false"
-      OAUTH_RBAC_ENABLED: "false"
+      NEO4J_DSN: "${NEO4J_DSN:-bolt://neo4j:changeme1234@database:7687/mdrdb}"
+      ALLOW_ORIGIN_REGEX: "${ALLOW_ORIGIN_REGEX:-.*}"
+      OAUTH_ENABLED: "${OAUTH_ENABLED:-False}"
+      OAUTH_RBAC_ENABLED: "${OAUTH_RBAC_ENABLED:-False}"
+      OAUTH_METADATA_URL: "${OAUTH_METADATA_URL:-}"
+      OAUTH_API_APP_ID: "${OAUTH_API_APP_ID:-}"
+      OAUTH_SWAGGER_APP_ID: "${OAUTH_SWAGGER_APP_ID:-}"
       UVICORN_PORT: 5008
       UVICORN_ROOT_PATH: "/consumer-api"
       UVICORN_APP: consumer_api.consumer_api:app
-    expose:
-      - "8502:5008"
 
+  # Frontend image for production (see UI service for local development)
   frontend:
     build:
+      args:
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:alpine}
+        NODE_IMAGE: ${NODE_IMAGE:-node:lts-alpine}
       context: ./studybuilder
       dockerfile: Dockerfile
-      args:
-        NGINX_IMAGE: nginx:alpine
-        NODE_IMAGE: node:lts-alpine
-    environment:
-      API_BASE_URL: ""
-      DOC_BASE_URL: "/doc"
-      NEODASH_BASE_URL: "/neodash"
-      OAUTH_ENABLED: "false"
-    ports:
-      - "8505:5005"
+    image: ${FRONTEND_IMAGE:-}
     depends_on:
+      # Nginx reverse-proxy configuration requires downstream services to be ready at startup
       api:
-        condition: service_started
+        condition: service_healthy
       documentation:
-        condition: service_started
+        condition: service_healthy
       neodash:
-        condition: service_started
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-5005}:5005"
+    environment:
+      API_BASE_URL: "${API_PATH:-}"
+      DOC_BASE_URL: "${DOC_PATH:-}"
+      NEODASH_BASE_URL: "${NEODASH_PATH:-}"
+      OAUTH_ENABLED: "${OAUTH_ENABLED:-false}"
+      OAUTH_METADATA_URL: "${OAUTH_METADATA_URL:-}"
+      OAUTH_API_APP_ID: "${OAUTH_API_APP_ID:-}"
+      OAUTH_UI_APP_ID: "${OAUTH_UI_APP_ID:-}"
+      APPINSIGHTS_DISABLE: "true"
 
+  # Documentation portal image for production (see docs service for local development)
   documentation:
     build:
+      args:
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:alpine}
+        NODE_IMAGE: ${NODE_IMAGE:-node:lts-alpine}
       context: ./documentation-portal
       dockerfile: Dockerfile
+    image: ${DOCUMENTATION_IMAGE:-}
 
+  # Neodash service used with defined parameters
   neodash:
+    image: ${NEODASH_IMAGE:-}
     build:
       context: ./osb-neodash
       dockerfile: Dockerfile
       args:
-        NODE_IMAGE: node:lts-alpine
-        NGINX_IMAGE: nginx:alpine
-    environment:
-      NGINX_PORT: 5007
-      ssoEnabled: "false"
-      standalone: "true"
-      standaloneProtocol: "neo4j"
-      standaloneHost: "10.161.18.181"
-      standalonePort: "7687"
-      standaloneDatabase: "openstudybuilder"
-      standaloneAllowLoad: "true"
-      standaloneDashboardName: "Activity Library Dashboard"
-      standaloneDashboardDatabase: "openstudybuilder"
-      standaloneUsername: "neo4j"
-      standalonePassword: "${NEO4J_PASSWORD}"
+        NODE_IMAGE: ${NODE_IMAGE:-node:lts-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:alpine}
+    depends_on:
+      database:
+        condition: service_healthy
     ports:
-      - "8507:5007"
+      - "${BIND_ADDRESS:-127.0.0.1}:${NEODASH_PORT:-5007}:5007"
+    environment:
+      - NGINX_PORT=5007
+      - ssoEnabled=false
+      - ssoDiscoveryUrl=https://localhost.com
+      - standalone=true
+      - standaloneProtocol=neo4j
+      - standaloneHost=localhost
+      - standalonePort=5002
+      - standaloneDatabase=mdrdb
+      - standaloneAllowLoad=true
+      - standaloneDashboardName=Activity Library Dashboard
+      - standaloneDashboardDatabase=mdrdb
+      - standaloneUsername=neo4j
+      - standalonePassword=${NEO4J_PASSWORD:-changeme1234}
+
+
+volumes:
+  # Volume for storing the database on a local development environment
+  data:
+    name: studybuilder_database
