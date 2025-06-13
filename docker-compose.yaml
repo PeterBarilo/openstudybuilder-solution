@@ -16,7 +16,7 @@ services:
       UVICORN_PORT: 5003
       UVICORN_ROOT_PATH: "/api"
     expose:
-      - "5003"
+      - "8501:5003"
 
   consumerapi:
     build:
@@ -33,7 +33,7 @@ services:
       UVICORN_ROOT_PATH: "/consumer-api"
       UVICORN_APP: consumer_api.consumer_api:app
     expose:
-      - "5008"
+      - "8502:5008"
 
   frontend:
     build:
