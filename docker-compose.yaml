@@ -7,7 +7,7 @@ services:
       context: ./clinical-mdr-api
       dockerfile: Dockerfile
       args:
-        TARGET: prod
+        TARGET:  ${BUILD_TARGET:-dev}
     environment:
       NEO4J_DSN: "${NEO4J_DSN}"
       ALLOW_ORIGIN_REGEX: ".*"
